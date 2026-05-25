@@ -102,8 +102,8 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS articles (
-            aid TEXT PRIMARY KEY,
             fakeid TEXT NOT NULL,
+            aid TEXT NOT NULL,
             title TEXT NOT NULL,
             link TEXT DEFAULT '',
             author TEXT DEFAULT '',
@@ -122,6 +122,7 @@ def init_db():
             appmsg_album_id TEXT DEFAULT '',
             downloaded INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            PRIMARY KEY (fakeid, aid),
             FOREIGN KEY (fakeid) REFERENCES accounts(fakeid) ON DELETE CASCADE
         );
 
@@ -132,7 +133,6 @@ def init_db():
             file_path TEXT DEFAULT '',
             file_size INTEGER DEFAULT 0,
             downloaded_at TEXT DEFAULT (datetime('now', 'localtime')),
-            FOREIGN KEY (aid) REFERENCES articles(aid) ON DELETE CASCADE,
             UNIQUE(aid, format)
         );
 
@@ -190,6 +190,70 @@ def migrate_db():
     dl_cols = [row["name"] for row in conn.execute("PRAGMA table_info(downloads)").fetchall()]
     if "file_size" not in dl_cols:
         conn.execute("ALTER TABLE downloads ADD COLUMN file_size INTEGER DEFAULT 0")
+
+    # 修复 downloads 表 FOREIGN KEY (aid) REFERENCES articles(aid) 不匹配问题
+    # articles 表的 PK 是 (fakeid, aid)，单独 aid 不是键，SQLite 拒绝该外键
+    dl_schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='downloads'"
+    ).fetchone()
+    if dl_schema and 'FOREIGN KEY' in (dl_schema[0] or ''):
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS downloads_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                aid TEXT NOT NULL,
+                format TEXT NOT NULL,
+                file_path TEXT DEFAULT '',
+                file_size INTEGER DEFAULT 0,
+                downloaded_at TEXT DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(aid, format)
+            );
+            INSERT INTO downloads_new SELECT * FROM downloads;
+            DROP TABLE downloads;
+            ALTER TABLE downloads_new RENAME TO downloads;
+            CREATE INDEX IF NOT EXISTS idx_downloads_aid ON downloads(aid);
+        """)
+        conn.execute("PRAGMA foreign_keys=ON")
+
+    # articles 表复合主键迁移（aid 跨号重复修复）
+    pk_info = conn.execute("PRAGMA table_info(articles)").fetchall()
+    pk_cols = [r for r in pk_info if r["pk"] > 0]
+    if len(pk_cols) == 1 and pk_cols[0]["name"] == "aid":
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS articles_new (
+                fakeid TEXT NOT NULL,
+                aid TEXT NOT NULL,
+                title TEXT NOT NULL,
+                link TEXT DEFAULT '',
+                author TEXT DEFAULT '',
+                digest TEXT DEFAULT '',
+                create_time INTEGER DEFAULT 0,
+                update_time INTEGER DEFAULT 0,
+                cover TEXT DEFAULT '',
+                pic_crop_1_1 TEXT DEFAULT '',
+                pic_crop_16_9 TEXT DEFAULT '',
+                is_deleted INTEGER DEFAULT 0,
+                is_pay_subscribe INTEGER DEFAULT 0,
+                is_only_fans INTEGER DEFAULT 0,
+                item_show_type INTEGER DEFAULT 0,
+                article_type INTEGER DEFAULT 0,
+                send_fan_count INTEGER DEFAULT 0,
+                appmsg_album_id TEXT DEFAULT '',
+                downloaded INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (fakeid, aid)
+            );
+            INSERT OR IGNORE INTO articles_new SELECT * FROM articles;
+            DROP TABLE articles;
+            ALTER TABLE articles_new RENAME TO articles;
+        """)
+        conn.execute("PRAGMA foreign_keys=ON")
+        # 重建索引
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_fakeid ON articles(fakeid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_title ON articles(title)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_create_time ON articles(create_time)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_fakeid_time ON articles(fakeid, create_time)")
 
     conn.commit()
     conn.close()
